@@ -1,0 +1,40 @@
+server:
+  host: "192.168.1.100"
+  port: 8080
+  fake_identity: "Apache/2.2.14 (Win32)"
+  fake_powered_by: "PHP/5.2.17"
+  fake_server_name: "CORP-INTRANET-OLD01"
+
+# IP ranges treated as "internal" — contacts from these trigger HIGH/CRITICAL alerts
+internal_ranges:
+  - "10.0.0.0/8"
+  - "192.168.0.0/16"
+  - "172.16.0.0/12"
+  - "127.0.0.1/32"
+
+tarpit:
+  base_delay: 1.0        # seconds, delay for first throttled request
+  multiplier: 2.5        # exponential growth factor per request
+  max_delay: 30.0        # hard cap in seconds
+  window_seconds: 60     # rolling window for counting requests per IP
+  post_delay: 3.0        # fixed delay for ALL POST requests (credential simulation)
+  threshold: 3           # free requests before throttling begins
+
+alerting:
+  cooldown_seconds: 300  # min seconds before re-alerting the same IP (unless severity increases)
+  email:
+    enabled: false       # set to true and fill in credentials to activate
+    smtp_host: "smtp.gmail.com"
+    smtp_port: 587
+    use_tls: true
+    username: ""
+    password: ""
+    from_addr: "honeypot@corp.local"
+    to_addr: "soc@corp.local"
+  webhook:
+    enabled: false       # set to true and provide URL to activate
+    url: ""              # Slack/Teams/Discord incoming webhook URL
+
+logging:
+  db_path: "data/honeypot.db"
+  log_file: "data/honeypot.log"

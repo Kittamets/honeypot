@@ -58,7 +58,7 @@ python main.py config.yaml
 
 | Key | Description |
 |-----|-------------|
-| `server.host / port` | Bind address (default `0.0.0.0:8080`) |
+| `server.host / port` | Bind address (default `192.168.1.100:8080`) |
 | `server.fake_identity` | `Server:` header value — looks like old Apache |
 | `internal_ranges` | CIDR list — contacts from these ranges trigger HIGH/CRITICAL alerts |
 | `tarpit.base_delay` | Seconds for the first throttled request |
@@ -80,7 +80,7 @@ python main.py config.yaml
 |----------|------------------------|
 | `GET /` | Old Apache directory listing of the "DMS" server |
 | `GET /admin/login` | Admin login form |
-| `POST /admin/login` | Accepts any credentials → redirects to fake dashboard |
+| `POST /admin/login` | Detects SQLi bypass patterns (fake success) or one valid credential; wrong creds return error page — all submissions logged |
 | `GET /admin/dashboard` | Fake admin panel with fake user activity |
 | `GET /admin/users` | Fake user table with internal email addresses |
 | `GET /backup/` | Directory listing with `db_backup.sql` and `.zip` files |
@@ -92,6 +92,7 @@ python main.py config.yaml
 | `GET /old-api/v1/config` | JSON config with database and LDAP credentials |
 | `GET /phpmyadmin/` | Fake phpMyAdmin login page |
 | `GET /manager/html` | Fake Apache Tomcat manager (returns 401 with auth prompt) |
+| `GET /config` | Same PHP config source rendered inside an HTML `<pre>` block |
 | `GET /robots.txt` | Intentionally lists all bait paths — helps scanners find them |
 
 ---
@@ -109,8 +110,6 @@ SELECT id, timestamp, source_ip, alert_type, severity,
        endpoints_accessed, scanner_type, details
 FROM alerts;
 ```
-
----
 
 ---
 
@@ -224,12 +223,12 @@ executing it (common on IIS + PHP installs, or after a PHP upgrade).
 ### `/admin/login` (GET + POST)
 **What it does:**
 - `GET` — renders a realistic HTML login form.
-- `POST` — **accepts any username/password**, logs the submitted credentials,
-  then redirects to `/admin/dashboard`.
+- `POST` — logs all submitted credentials, then:
+  - **SQL injection detected** (e.g. `' OR 1=1--`, `UNION SELECT`) → redirect to `/admin/dashboard` (fake bypass success).
+  - **Valid hardcoded credential** matched → redirect to `/admin/dashboard`.
+  - **Anything else** → re-renders the login form with an error (attacker keeps trying).
 
-**Vulnerability simulated:** No authentication / hard-coded bypass. The attacker
-believes they have successfully gained admin access. Every credential they try is
-captured in the database.
+**Vulnerability simulated:** SQL injection bypass and a weak hardcoded credential (CWE-798 / OWASP A07). The attacker believes injection worked; every attempt is captured in the database.
 
 ---
 
@@ -307,7 +306,8 @@ Phase 4 — Authentication Attempt
   ← ALERT TRIGGERED: INTERNAL CREDENTIAL SUBMISSION (severity HIGH)
   ← 3-second POST delay simulates "slow authentication"
   ← Submitted username + password captured in DB
-  → Redirect to /admin/dashboard — attacker thinks they are in
+  → SQLi bypass detected → redirect to /admin/dashboard (attacker thinks injection worked)
+  → Wrong credentials → error page → attacker keeps guessing (all attempts logged)
 
 Phase 5 — Post-Auth Exploration
   Attacker browses /admin/dashboard, /admin/users
