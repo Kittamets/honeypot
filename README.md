@@ -125,34 +125,38 @@ FROM alerts;
                               control (RAT / C2)        │
                                                         ▼
  ╔══════════════════════════════════════════════════════════════════════╗
- ║                   CORPORATE INTERNAL NETWORK                        ║
+ ║  EMPLOYEE VLAN — 10.0.2.0/24                                        ║
  ║                                                                     ║
- ║  ┌─────────────────────┐                                           ║
- ║  │  Compromised        │  ◄── Attacker now operating               ║
- ║  │  Employee PC        │      from inside the network              ║
- ║  │  192.168.1.42       │                                           ║
- ║  └──────────┬──────────┘                                           ║
- ║             │                                                       ║
- ║             │  Lateral movement: port scan + HTTP requests         ║
- ║             │  (attacker probes every live host on the subnet)     ║
- ║             │                                                       ║
- ║    ┌────────▼──────────────┐       ┌──────────────────────────┐    ║
- ║    │       HONEYPOT        │──────►│    SOC / Admin           │    ║
- ║    │  192.168.1.99 :80     │ Alert │    alert@corp.local      │    ║
- ║    │  "CORP-INTRANET-OLD01"│ Email │    Slack / Teams webhook │    ║
- ║    │   Apache 2.2.14 (fake)│       └──────────────────────────┘    ║
- ║    └───────────────────────┘                                       ║
+ ║  ┌─────────────────────┐                                            ║
+ ║  │  Compromised        │  ◄── Attacker now operating                ║
+ ║  │  Employee PC        │      from inside the network               ║
+ ║  │  10.0.2.42          │                                            ║
+ ║  └──────────┬──────────┘                                            ║
+ ╚═════════════╪════════════════════════════════════════════════════════╝
+               │  Cross-VLAN lateral movement (inter-VLAN routing)
+               │  attacker port-scans every host in the server subnet
+               ▼
+ ╔══════════════════════════════════════════════════════════════════════╗
+ ║  SERVER VLAN — 10.0.1.0/24                                          ║
  ║                                                                     ║
- ║   Real servers (NOT the attacker's target — honeypot draws fire):  ║
- ║   ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────────────┐  ║
- ║   │ AD / DC  │  │ DB Server│  │ File     │  │ Production Web   │  ║
- ║   │192.168.1.5│  │192.168.1.10│  │ Share    │  │ Server           │  ║
- ║   └──────────┘  └──────────┘  └──────────┘  └──────────────────┘  ║
+ ║  ┌──────────────────────────┐     ┌──────────────────────────┐      ║
+ ║  │        HONEYPOT          │────►│    SOC / Admin           │      ║
+ ║  │  10.0.1.99 :8080         │Alert│    alert@corp.local      │      ║
+ ║  │  "CORP-INTRANET-OLD01"   │Email│    Slack / Teams webhook │      ║
+ ║  │   Apache 2.2.14 (fake)   │     └──────────────────────────┘      ║
+ ║  └──────────────────────────┘                                        ║
+ ║                                                                      ║
+ ║  Real servers (honeypot draws fire away from these):                 ║
+ ║  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────────────┐    ║
+ ║  │ AD / DC  │  │ DB Server│  │   File   │  │ Production Web   │    ║
+ ║  │ 10.0.1.5 │  │ 10.0.1.10│  │   Share  │  │    Server        │    ║
+ ║  │          │  │          │  │ 10.0.1.20│  │  10.0.1.30       │    ║
+ ║  └──────────┘  └──────────┘  └──────────┘  └──────────────────┘    ║
  ╚══════════════════════════════════════════════════════════════════════╝
 
 Traffic key
-  ──── Normal internal traffic (employees → real servers)
-  ════ Attacker lateral movement scan (triggers honeypot)
+  ──── Normal internal traffic (employees → real servers via L3 switch)
+  ════ Attacker cross-VLAN scan (employee VLAN → server VLAN)
   ────► Honeypot alert to SOC (email / webhook)
 ```
 
@@ -160,14 +164,46 @@ Traffic key
 
 | Decision | Reason |
 |----------|--------|
-| Same subnet as employees | Attacker doing a subnet sweep (`nmap 192.168.1.0/24`) finds the honeypot at the same time as real servers. |
-| No firewall rules blocking inbound HTTP from internal segment | The honeypot must be reachable by any compromised machine. |
-| Not advertised in DNS or Active Directory | A legitimate user has no reason to browse to it; any contact is therefore suspicious. |
+| Honeypot placed in server VLAN (10.0.1.0/24), alongside real servers | An attacker pivoting from the employee VLAN will port-scan the entire server subnet — the honeypot is discovered at the same time as AD, DB, and file servers. |
+| Employee workstations isolated in a separate VLAN (10.0.2.0/24) | Legitimate users have no business need to contact the server VLAN directly; any HTTP connection to the honeypot is immediately suspicious. |
+| No firewall rule blocking inbound HTTP from the employee VLAN | The honeypot must be reachable by any compromised machine that can route across VLANs. |
+| Not advertised in DNS or Active Directory | No legitimate user has a reason to browse to it; any contact is therefore suspicious. |
 | Isolated from real data stores | The honeypot holds only fake credentials. It cannot be used as a pivot to reach real databases. |
 
 ---
 
 # Q2 — Vulnerable Web Server Breakdown
+
+## 2.0 Web Server Role & Purpose
+
+**CORP-INTRANET-OLD01** (`10.0.1.99:8080`) impersonates a legacy **Document Management System (DMS) v2.1** that was used by the Finance and HR departments from 2009 to 2013. It sits in the server VLAN alongside real production servers (AD, DB, File Share) and has been left running without active maintenance — the kind of forgotten, unpatched server common in large organisations.
+
+### Why does this server exist?
+
+| Attribute | Detail |
+| --------- | ------ |
+| **Hostname** | `CORP-INTRANET-OLD01` |
+| **Claimed role** | Internal Document Management System — stores policy documents, HR forms, finance reports |
+| **Location** | Server VLAN `10.0.1.0/24`, reachable from employee VLAN via inter-VLAN routing |
+| **Apparent age** | Last updated 2013 (copyright notices, HTML 4.01, vintage CSS) |
+| **Tech stack (fake)** | Apache 2.2.14 (Win32), PHP 5.2.17 — both end-of-life and CVE-rich |
+| **Why attractive to an attacker** | Old software = hundreds of known CVEs; exposed admin panel, DB backups, and credentials that could be used to pivot to real servers in the same subnet |
+
+### Vulnerability Summary
+
+| Vulnerability | CWE / OWASP | Endpoint(s) | Attacker goal |
+| ------------- | ----------- | ----------- | ------------- |
+| Exposed environment file | CWE-538 / A05 Security Misconfiguration | `/.env` | Harvest DB, LDAP, SMTP, and API credentials in plaintext |
+| PHP source disclosure | CWE-200 / A05 Security Misconfiguration | `/config.php`, `/config` | Read hardcoded DB password, LDAP bind password, encryption key |
+| SQL injection authentication bypass | CWE-89 / A03 Injection | `POST /admin/login` | Bypass login with e.g. `' OR 1=1--` |
+| Hardcoded credential | CWE-798 / A07 Identification and Authentication Failures | `POST /admin/login` | Log in with guessable admin password |
+| Broken access control — backup exposure | CWE-284 / A01 Broken Access Control | `/backup/`, `/db_backup.sql`, `/backup.zip` | Download MySQL dump containing password hashes and API keys |
+| Unauthenticated legacy API | CWE-306 / A01 + A07 | `/old-api/v1/users`, `/old-api/v1/config` | Enumerate internal users and credentials without authentication |
+| Exposed phpMyAdmin | CWE-16 / A05 Security Misconfiguration | `/phpmyadmin/` | Brute-force database admin access |
+| Exposed Tomcat Manager | CVE-2010-4094 family / A05 | `/manager/html` | Deploy a malicious WAR file for remote code execution |
+| Path disclosure via `robots.txt` | CWE-548 / A01 | `/robots.txt` | Automatically discover every hidden bait path |
+
+---
 
 ## 2.1 Fake Identity
 
@@ -264,7 +300,7 @@ A07 Identification and Authentication Failures).
 
 ### `/phpmyadmin/`
 **What it serves:** A realistic phpMyAdmin 3.3.10.4 login form pre-filled with
-server `192.168.1.10`.
+server `10.0.1.10`.
 
 **Vulnerability simulated:** Exposed phpMyAdmin (extremely common misconfiguration).
 Attackers routinely attempt default credentials (`root:`, `root:root`, etc.).
@@ -283,13 +319,13 @@ deployment if authenticated).
 
 ```
 Phase 1 — Reconnaissance
-  Attacker runs: nmap -sV 192.168.1.0/24
-  → Finds port 80 open on 192.168.1.99
+  Attacker runs: nmap -sV 10.0.1.0/24   (probing the server VLAN from employee VLAN)
+  → Finds port 8080 open on 10.0.1.99
   → Banner: "Apache/2.2.14 (Win32)" — flags as potentially vulnerable
 
 Phase 2 — Initial Scan
-  Attacker runs: nikto -h http://192.168.1.99
-              or: gobuster dir -u http://192.168.1.99 -w common.txt
+  Attacker runs: nikto -h http://10.0.1.99:8080
+              or: gobuster dir -u http://10.0.1.99:8080 -w common.txt
   → Hits /robots.txt → reads list of hidden paths
   → Starts requesting /.env, /config.php, /backup/, /phpmyadmin/
   ← ALERT TRIGGERED: INTERNAL IP FIRST CONTACT (severity HIGH)
@@ -314,7 +350,7 @@ Phase 5 — Post-Auth Exploration
   → Reads fake user table and "confidential" activity log
   → Tries /phpmyadmin/ with harvested password
   ← All actions logged; tarpit delays now at 15-30 s per request
-  ← SOC has received alert and is tracing 192.168.1.42
+  ← SOC has received alert and is tracing 10.0.2.42
 ```
 
 ---
@@ -353,13 +389,13 @@ any documentation).
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
 │ 1. PACKET RECEIVED                                                  │
-│    aiohttp accepts TCP connection from 192.168.1.42:54321           │
+│    aiohttp accepts TCP connection from 10.0.2.42:54321              │
 └──────────────────────────────────┬──────────────────────────────────┘
                                    │
 ┌──────────────────────────────────▼──────────────────────────────────┐
 │ 2. SOURCE IP EXTRACTED                                              │
 │    X-Forwarded-For header checked; falls back to request.remote     │
-│    IP classified: internal? (matches 192.168.0.0/16 → YES)         │
+│    IP classified: internal? (matches 10.0.0.0/8 → YES)             │
 └──────────────────────────────────┬──────────────────────────────────┘
                                    │
 ┌──────────────────────────────────▼──────────────────────────────────┐
@@ -379,7 +415,7 @@ any documentation).
 ┌──────────────────────────────────▼──────────────────────────────────┐
 │ 5. REQUEST LOGGED TO SQLITE                                         │
 │    Table: requests                                                  │
-│    source_ip="192.168.1.42", method="GET", path="/.env"             │
+│    source_ip="10.0.2.42", method="GET", path="/.env"                │
 │    is_internal=1, scanner_type="python-requests"                    │
 │    severity="CRITICAL"                                              │
 │    fingerprint_details="Tool detected: python-requests | Suspicious │
@@ -389,7 +425,7 @@ any documentation).
 ┌──────────────────────────────────▼──────────────────────────────────┐
 │ 6. ALERT CONDITION EVALUATED                                        │
 │    is_internal=True AND scanner detected → needs_alert = True       │
-│    AlertTracker: first time seeing 192.168.1.42 → should_alert=True │
+│    AlertTracker: first time seeing 10.0.2.42 → should_alert=True    │
 │    Alert recorded in tracker, alert row inserted into DB            │
 └──────────────────────────────────┬──────────────────────────────────┘
                                    │
@@ -399,7 +435,7 @@ any documentation).
 │    ┌─── Email ──────────────────────────────────────────────────┐   │
 │    │ To: soc@corp.local                                         │   │
 │    │ Subject: [HONEYPOT CRITICAL] INTERNAL SCANNER DETECTED     │   │
-│    │          (python-requests) — 192.168.1.42                  │   │
+│    │          (python-requests) — 10.0.2.42                     │   │
 │    │ Body: IP, timestamp, endpoints, tool, action required       │   │
 │    └────────────────────────────────────────────────────────────┘   │
 │                                                                     │
@@ -414,14 +450,14 @@ any documentation).
 │ 8. SOC RECEIVES ALERT                                               │
 │                                                                     │
 │  Alert contains:                                                    │
-│  • Source IP:  192.168.1.42                                         │
+│  • Source IP:  10.0.2.42                                            │
 │  • Severity:   CRITICAL                                             │
 │  • Tool:       python-requests                                      │
 │  • Endpoints:  ["/robots.txt", "/.env", "/db_backup.sql", ...]      │
 │  • Timestamp:  2026-02-23 09:14:33 UTC                              │
 │                                                                     │
 │  SOC analyst actions:                                               │
-│  1. Query DHCP server: what machine holds 192.168.1.42?             │
+│  1. Query DHCP server: what machine holds 10.0.2.42?               │
 │     → "WKSTN-FINANCE-07 leased to b.williams since 08:30"          │
 │  2. Query AD: who is logged in to WKSTN-FINANCE-07?                 │
 │     → bwilliams (Bob Williams, Finance dept)                        │
@@ -441,7 +477,7 @@ any documentation).
 Severity      : CRITICAL
 Alert Type    : INTERNAL SCANNER DETECTED (python-requests)
 Timestamp     : 2026-02-23 09:14:33 UTC
-Source IP     : 192.168.1.42
+Source IP     : 10.0.2.42
 Tool/Scanner  : python-requests
 
 Endpoints accessed:
@@ -456,7 +492,7 @@ Tool detected: python-requests | Suspicious path: /.env
 
 ──────────────────────────────────────────────────
 ACTION REQUIRED
-  1. Identify which machine owns IP: 192.168.1.42
+  1. Identify which machine owns IP: 10.0.2.42
      (Check DHCP leases, AD computer accounts, NAC logs)
   2. Isolate the machine from the network immediately.
   3. Begin incident response — assume full compromise.
@@ -464,7 +500,8 @@ ACTION REQUIRED
 ```
 
 This single alert gives the SOC analyst everything needed to:
-- Pinpoint the compromised machine (via DHCP/NAC lookup of `192.168.1.42`)
+
+- Pinpoint the compromised machine (via DHCP/NAC lookup of `10.0.2.42`)
 - Understand the attacker's intent (credential harvesting, reconnaissance)
 - Prioritise response (CRITICAL = active scanner from internal IP)
 - Act fast — the tarpit is buying time, but the window is limited
